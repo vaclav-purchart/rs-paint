@@ -359,6 +359,14 @@ struct CurveState {
     stage: u8, // 0 = dragging endpoints, 1 = bend #1, 2 = bend #2
 }
 
+/// A persisted open tab: its file path and zoom level.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct TabPersist {
+    path: String,
+    #[serde(default)]
+    zoom: f32,
+}
+
 /// User preferences persisted between runs (via eframe storage).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Settings {
@@ -369,14 +377,13 @@ struct Settings {
     fill_shapes: bool,
     corner_radius: i32,
     text_size: f32,
-    zoom: f32,
     theme: ThemeChoice,
     show_grid: bool,
     antialias: bool,
     fill_tolerance: i32,
-    /// Paths of the open tabs (untitled tabs are omitted), restored next run.
+    /// Open tabs (untitled tabs are omitted), with per-tab zoom, restored next run.
     #[serde(default)]
-    open_files: Vec<String>,
+    open_tabs: Vec<TabPersist>,
     #[serde(default)]
     active_tab: usize,
 }
@@ -3707,26 +3714,28 @@ impl PaintApp {
             fill_shapes: self.fill_shapes,
             corner_radius: self.corner_radius,
             text_size: self.text_size,
-            zoom: self.zoom,
             theme: self.theme,
             show_grid: self.show_grid,
             antialias: self.antialias,
             fill_tolerance: self.fill_tolerance,
-            open_files: self.open_paths(),
+            open_tabs: self.open_tabs_state(),
             active_tab: self.active_among_saved(),
         }
     }
 
-    /// Paths of all open tabs that have a file (in tab order).
-    fn open_paths(&self) -> Vec<String> {
+    /// File-backed tabs (in tab order) with their per-tab zoom, for persistence.
+    fn open_tabs_state(&self) -> Vec<TabPersist> {
         (0..self.docs.len())
             .filter_map(|i| {
-                let path = if i == self.active {
-                    &self.file_path
+                let (path, zoom) = if i == self.active {
+                    (&self.file_path, self.zoom)
                 } else {
-                    &self.docs[i].file_path
+                    (&self.docs[i].file_path, self.docs[i].zoom)
                 };
-                path.as_ref().map(|p| p.to_string_lossy().into_owned())
+                path.as_ref().map(|p| TabPersist {
+                    path: p.to_string_lossy().into_owned(),
+                    zoom,
+                })
             })
             .collect()
     }
@@ -3744,17 +3753,19 @@ impl PaintApp {
             .count()
     }
 
-    /// Reopen the tabs saved from a previous run (skips files that no longer load).
-    fn restore_tabs(&mut self, paths: Vec<String>, active_tab: usize) {
+    /// Reopen the tabs saved from a previous run (skips files that no longer
+    /// load), restoring each tab's zoom.
+    fn restore_tabs(&mut self, tabs: Vec<TabPersist>, active_tab: usize) {
         let mut loaded = false;
-        for p in paths {
-            let path = PathBuf::from(&p);
+        for t in tabs {
+            let path = PathBuf::from(&t.path);
             let Ok(img) = image::open(&path) else {
                 continue;
             };
             let rgba = img.to_rgba8();
             let (w, h) = (rgba.width() as usize, rgba.height() as usize);
             let ci = ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+            let zoom = if t.zoom > 0.0 { t.zoom } else { 1.0 };
             if loaded {
                 self.new_tab_with(ci, Some(path), false);
             } else {
@@ -3767,6 +3778,7 @@ impl PaintApp {
                 self.dirty = true;
                 loaded = true;
             }
+            self.zoom = zoom; // applies to the now-active restored tab
         }
         if loaded {
             self.switch_to(active_tab.min(self.docs.len().saturating_sub(1)));
@@ -3782,7 +3794,7 @@ impl PaintApp {
         self.fill_shapes = s.fill_shapes;
         self.corner_radius = s.corner_radius.clamp(0, 200);
         self.text_size = s.text_size.clamp(8.0, 200.0);
-        self.zoom = if s.zoom > 0.0 { s.zoom } else { 1.0 };
+        // zoom is per-tab (restored by restore_tabs); new tabs default to 100%.
         self.theme = s.theme;
         self.show_grid = s.show_grid;
         self.antialias = s.antialias;
@@ -4160,10 +4172,10 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             let mut app = PaintApp::default();
             if let Some(storage) = cc.storage {
-                if let Some(s) = eframe::get_value::<Settings>(storage, eframe::APP_KEY) {
-                    let (files, active_tab) = (s.open_files.clone(), s.active_tab);
+                if let Some(mut s) = eframe::get_value::<Settings>(storage, eframe::APP_KEY) {
+                    let (tabs, active_tab) = (std::mem::take(&mut s.open_tabs), s.active_tab);
                     app.apply_settings(s);
-                    app.restore_tabs(files, active_tab);
+                    app.restore_tabs(tabs, active_tab);
                 }
             }
             Ok(Box::new(app))
