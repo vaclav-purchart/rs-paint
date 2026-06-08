@@ -4115,14 +4115,11 @@ impl eframe::App for PaintApp {
             self.last_title = title;
         }
 
-        // Keep previews live for multi-click tools.
-        if !self.poly_points.is_empty()
-            || self.curve.is_some()
-            || self.floating.is_some()
-            || self.text_pos.is_some()
-        {
-            ctx.request_repaint();
-        }
+        // egui runs reactively: it only repaints on input or an explicit
+        // request_repaint(). We have no time-based animation (marching ants and
+        // the text caret are static; the rubber-band/cursor previews follow the
+        // pointer, which already triggers repaints), so we request nothing here —
+        // the app stays idle (≈0% CPU) when there's no interaction.
     }
 }
 

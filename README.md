@@ -10,6 +10,8 @@ that is re-uploaded to a GPU texture only when it changes.
 Primarily developed for macOS, but the code is cross-platform (Windows / Linux)
 because egui is.
 
+![rs-paint screenshot](examples/app-screenshot.png)
+
 ## Features
 
 **Tools:** Pencil · Brush · Eraser · Fill (flood) · Eyedropper · Line ·
