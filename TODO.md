@@ -1,0 +1,13 @@
+- [x] generate .gitignore for this rust project
+- [x] support system clipboard for copy & paste image data
+- [x] is it possible to make design nicer and more modern? (currently it is just black squares with text - most of the icons doesn't work correctly). I'd like to respect system theme (dark/light) with optional switch in the menu + add some nice icons + instead of two column layout for tools I'd like to have just one column
+- [x] add cmd/ctrl+e to display image clipping dialog
+- [x] when there are unsaved changes ask for save before quitting the app
+- [x] add image/selection resize by drag&drop in the corners and sides
+- [x] add switch foreground/background colors
+- [x] add support for cmd/ctrl+a - it will make a selection of whole image
+- [x] when selection is active cursor arrows will move selection by 1px (up,down,left,right)
+- [x] add support for transparent color
+- [x] ESC key should cancel and close all dialogs, Enter confirms them
+- [x] Resize dialog shouldn't clear image after resizing
+- [x] add tabs to work on multiple images at once - loading image will create a new tab; when pasting image data user will be asked if it should be to a new tab or current image; cmd/ctrl+t opens new tab; cmd/ctrl+w closes tab (if saved; otherwise asks for saving); add "Save all" to main menu; add unsaved indicator to tab name; tabs should have cross symbol to close tab - always ask if not saved for saving; 

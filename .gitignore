@@ -1,0 +1,18 @@
+# Rust / Cargo build artifacts
+/target/
+debug/
+**/*.rs.bk
+*.pdb
+
+# Note: Cargo.lock is intentionally committed (this crate is a binary).
+
+# icon_1024.png is committed: it's embedded into the binary (load_icon) and is
+# the source for the .icns. Regenerate via `cargo run --release --example gen_icon`.
+/assets/AppIcon.icns
+
+# macOS app bundle (reproducible via `./packaging/bundle.sh`)
+/rs-paint.app/
+
+# macOS cruft
+.DS_Store
+rs-paint.zip
