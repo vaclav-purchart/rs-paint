@@ -1,6 +1,6 @@
 [package]
 name = "rs-paint"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "A lightweight MS Paint clone built with Rust + egui"
 

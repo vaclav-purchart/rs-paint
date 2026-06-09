@@ -8,6 +8,8 @@ cd "$ROOT"
 
 APP="rs-paint.app"
 BIN="rs-paint"
+VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+ARCH="$(uname -m)" # arm64 or x86_64
 
 # Generate the icon first: it is embedded into the binary, so it must exist
 # (and be current) before the release build.
@@ -37,6 +39,10 @@ cp "target/release/$BIN" "$APP/Contents/MacOS/$BIN"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 chmod +x "$APP/Contents/MacOS/$BIN"
 
+# Stamp the version from Cargo.toml into the bundle (single source of truth).
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "$VERSION" "$APP/Contents/Info.plist"
+
 # Sign the bundle. If a Developer ID identity is available (CODESIGN_ID set, or
 # one is found in the keychain) use it with the hardened runtime; otherwise fall
 # back to an ad-hoc signature so the app at least runs cleanly on this machine.
@@ -57,4 +63,18 @@ codesign --verify --strict --verbose=2 "$APP" || true
 # Refresh Finder's icon cache for the new bundle.
 touch "$APP"
 
+# Distribution zip: the .app + install.sh, in bundles/.
+echo "==> Packaging distribution zip"
+mkdir -p bundles
+STAGE="$(mktemp -d)/rs-paint"
+mkdir -p "$STAGE"
+cp -R "$APP" "$STAGE/"
+cp install.sh "$STAGE/"
+ZIP="bundles/rs-paint-v${VERSION}-macos-${ARCH}.zip"
+rm -f "$ZIP"
+# No --keepParent: place rs-paint.app + install.sh at the zip root.
+ditto -c -k "$STAGE" "$ZIP"
+rm -rf "$(dirname "$STAGE")"
+
 echo "==> Done: $ROOT/$APP"
+echo "==> Bundle: $ROOT/$ZIP"

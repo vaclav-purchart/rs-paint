@@ -56,6 +56,17 @@ fn mac_change_count() -> isize {
     NSPasteboard::generalPasteboard().changeCount() as isize
 }
 
+/// A cheap monotonic clipboard "version" used to detect changes without
+/// decoding the contents.
+#[cfg(target_os = "macos")]
+fn clipboard_seq() -> isize {
+    mac_change_count()
+}
+#[cfg(target_os = "windows")]
+fn clipboard_seq() -> isize {
+    clipboard_win::seq_num().map(|n| n.get() as isize).unwrap_or(0)
+}
+
 /// Encode a ColorImage as BMP bytes (for the Windows clipboard).
 #[cfg(target_os = "windows")]
 fn encode_bmp(img: &ColorImage) -> Option<Vec<u8>> {
@@ -83,6 +94,14 @@ mod win_clip {
             // (write_clipboard takes &T where T: Sized).
             let _ = formats::Bitmap.write_clipboard(&bmp);
             let _ = formats::Unicode.write_clipboard(&marker);
+        }
+    }
+
+    /// Image only, no text marker (so other apps get a clean image).
+    pub fn set_image(bmp: &[u8]) {
+        if let Ok(_clip) = Clipboard::new_attempts(10) {
+            let _ = clipboard_win::empty();
+            let _ = formats::Bitmap.write_clipboard(&bmp);
         }
     }
 }
@@ -436,8 +455,10 @@ struct PaintApp {
     sel_undo_pushed: bool,
     clipboard: Option<ColorImage>,
     sys_clipboard: Option<arboard::Clipboard>,
-    #[allow(dead_code)] // only read on macOS
+    #[allow(dead_code)] // only read on macOS/Windows
     last_change_count: isize,
+    #[allow(dead_code)] // only read on macOS/Windows
+    was_focused: bool,
 
     undo_stack: Vec<ColorImage>,
     redo_stack: Vec<ColorImage>,
@@ -547,6 +568,7 @@ impl Default for PaintApp {
             clipboard: None,
             sys_clipboard: None,
             last_change_count: -1,
+            was_focused: true,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             file_path: None,
@@ -1650,12 +1672,19 @@ impl PaintApp {
     }
 
     /// Write an image to the OS clipboard as RGBA8 (for pasting into other apps).
-    fn set_system_image(&mut self, img: &ColorImage) {
+    /// Put the image on the OS clipboard. With `marker`, also attach a small
+    /// text marker so egui/winit forwards Cmd/Ctrl+V to us — used only while the
+    /// app is focused, then stripped on focus loss so other apps get a clean
+    /// image-only clipboard (otherwise some apps paste the marker text).
+    fn put_system_image(&mut self, img: &ColorImage, marker: bool) {
         #[cfg(target_os = "windows")]
         {
-            // Image + text marker together (so Ctrl+V is delivered).
             if let Some(bmp) = encode_bmp(img) {
-                win_clip::set_image_and_marker(&bmp, CLIP_MARKER);
+                if marker {
+                    win_clip::set_image_and_marker(&bmp, CLIP_MARKER);
+                } else {
+                    win_clip::set_image(&bmp);
+                }
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -1672,9 +1701,33 @@ impl PaintApp {
                     bytes: bytes.into(),
                 });
             }
-            // Tag the pasteboard with text so Cmd+V is delivered to us (macOS).
             #[cfg(target_os = "macos")]
-            mac_add_text_marker(CLIP_MARKER);
+            if marker {
+                mac_add_text_marker(CLIP_MARKER);
+            }
+            let _ = marker; // (Linux: no marker support)
+        }
+    }
+
+    fn set_system_image(&mut self, img: &ColorImage) {
+        self.put_system_image(img, true);
+    }
+
+    /// Remove the text marker we added (rewrite as image-only) when leaving the
+    /// app, so other apps paste the image rather than the marker text.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn strip_clipboard_marker(&mut self) {
+        let is_ours = if let Some(cb) = self.system_clipboard() {
+            cb.get_text().ok().as_deref() == Some(CLIP_MARKER)
+        } else {
+            false
+        };
+        if !is_ours {
+            return;
+        }
+        if let Some(img) = self.get_system_image() {
+            self.put_system_image(&img, false);
+            self.clipboard = Some(img);
         }
     }
 
@@ -4031,25 +4084,24 @@ impl eframe::App for PaintApp {
 
         self.handle_shortcuts(ctx);
 
-        // Whenever the clipboard changes (incl. via other apps), make sure an
-        // image-only clipboard is reachable from Cmd/Ctrl+V. Uses the cheap
-        // change-counter so we only inspect contents on a change.
-        #[cfg(target_os = "macos")]
+        // Clipboard marker management (macOS/Windows): egui/winit only forwards
+        // Cmd/Ctrl+V when the clipboard holds text, so we attach a tiny text
+        // marker to image clipboards *while focused*. On focus loss we strip it,
+        // so other apps (e.g. Teams) paste the image, not the marker text.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            let cc = mac_change_count();
-            if cc != self.last_change_count {
-                self.ensure_clipboard_marker();
-                self.last_change_count = mac_change_count();
+            let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+            if focused {
+                let cc = clipboard_seq();
+                let gained = !self.was_focused;
+                if gained || cc != self.last_change_count {
+                    self.ensure_clipboard_marker();
+                    self.last_change_count = clipboard_seq();
+                }
+            } else if self.was_focused {
+                self.strip_clipboard_marker();
             }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let seq = || clipboard_win::seq_num().map(|n| n.get() as isize).unwrap_or(0);
-            let cc = seq();
-            if cc != self.last_change_count {
-                self.ensure_clipboard_marker();
-                self.last_change_count = seq();
-            }
+            self.was_focused = focused;
         }
 
         // Switching tools commits any in-progress work.

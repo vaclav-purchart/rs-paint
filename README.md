@@ -92,7 +92,18 @@ open rs-paint.app            # or drag it into /Applications
 
 The script builds the release binary, regenerates the icon
 (`cargo run --release --example gen_icon`), converts it to `AppIcon.icns`
-via `sips` + `iconutil`, and assembles the bundle.
+via `sips` + `iconutil`, stamps the version from `Cargo.toml` into the bundle,
+assembles + signs `rs-paint.app`, and writes a distribution zip
+(`rs-paint.app` + `install.sh`) to
+`bundles/rs-paint-v<version>-macos-<arch>.zip`. The bundle path is printed at
+the end. (Because the version is read from `Cargo.toml`, bumping it only needs
+`cargo set-version` — no manual `Info.plist` edit.)
+
+On **Windows**, package the release `.exe` into the same `bundles/` folder:
+
+```powershell
+.\packaging\bundle-windows.ps1   # -> bundles\rs-paint-v<version>-windows-amd64.zip
+```
 
 `bundle.sh` **signs** the app: it uses a "Developer ID Application" certificate
 if one is in your keychain (set `CODESIGN_ID` to force a specific one), otherwise
@@ -156,12 +167,12 @@ by right-clicking ▸ **Open**, or clearing quarantine:
 > On Windows/Linux use `Ctrl` in place of `⌘`.
 >
 > **Paste note:** the windowing layer (egui/winit) only forwards `⌘V`/`Ctrl+V`
-> to the app when the clipboard holds *text*. rs-paint works around this on
-> **macOS** and **Windows**: it puts a small text marker on the clipboard when it
-> copies an image, and when the clipboard changes to an image with no text (e.g.
-> a screenshot from another app) it re-publishes that image with a marker — so
-> `⌘V`/`Ctrl+V` pastes images in both cases. On **Linux**, use **Edit ▸ Paste**
-> for image-only clipboards.
+> to the app when the clipboard holds *text*. On **macOS** and **Windows**,
+> rs-paint attaches a tiny text marker to image clipboards **only while it's the
+> focused app** (so `⌘V`/`Ctrl+V` pastes images, including screenshots), and
+> **strips the marker when it loses focus** — so other apps (e.g. Teams) paste
+> the actual image, never the marker. On **Linux**, use **Edit ▸ Paste** for
+> image-only clipboards.
 
 ## Windows
 

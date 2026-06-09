@@ -13,6 +13,9 @@ debug/
 # macOS app bundle (reproducible via `./packaging/bundle.sh`)
 /rs-paint.app/
 
+# Distribution zips (reproducible via the bundle scripts)
+/bundles/
+
 # macOS cruft
 .DS_Store
 rs-paint.zip
