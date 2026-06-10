@@ -85,15 +85,24 @@ fn encode_bmp(img: &ColorImage) -> Option<Vec<u8>> {
 /// Ctrl+V is delivered to the app (egui/winit only forwards it with text).
 #[cfg(target_os = "windows")]
 mod win_clip {
-    use clipboard_win::{formats, Clipboard, Setter};
+    use clipboard_win::{formats, options::NoClear, raw, Clipboard};
+
+    // CF_DIB is a BMP with its 14-byte BITMAPFILEHEADER stripped. Windows
+    // synthesizes CF_BITMAP/CF_DIBV5 from it, so image apps paste the image.
+    fn put_dib(bmp: &[u8]) {
+        if bmp.len() > 14 {
+            let _ = raw::set_without_clear(formats::CF_DIB, &bmp[14..]);
+        }
+    }
 
     pub fn set_image_and_marker(bmp: &[u8], marker: &str) {
         if let Ok(_clip) = Clipboard::new_attempts(10) {
+            // Empty ONCE, then add both formats with the *no-clear* setters: the
+            // default `set_string` empties the clipboard first, which would wipe
+            // the image we just placed (leaving only the marker text).
             let _ = clipboard_win::empty();
-            // Pass &&[u8] / &&str so the generic `T` is the *sized* &[u8]/&str
-            // (write_clipboard takes &T where T: Sized).
-            let _ = formats::Bitmap.write_clipboard(&bmp);
-            let _ = formats::Unicode.write_clipboard(&marker);
+            put_dib(bmp);
+            let _ = raw::set_string_with(marker, NoClear);
         }
     }
 
@@ -101,7 +110,7 @@ mod win_clip {
     pub fn set_image(bmp: &[u8]) {
         if let Ok(_clip) = Clipboard::new_attempts(10) {
             let _ = clipboard_win::empty();
-            let _ = formats::Bitmap.write_clipboard(&bmp);
+            put_dib(bmp);
         }
     }
 }
