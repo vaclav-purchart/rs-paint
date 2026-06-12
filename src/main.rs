@@ -113,6 +113,15 @@ mod win_clip {
             put_dib(bmp);
         }
     }
+
+    /// True if the clipboard currently holds *our* text marker. Read via
+    /// clipboard-win (the same crate we wrote it with) rather than arboard, so
+    /// detection can't disagree with what we put there.
+    pub fn marker_present(marker: &str) -> bool {
+        clipboard_win::get_clipboard_string()
+            .map(|s| s == marker)
+            .unwrap_or(false)
+    }
 }
 
 /// macOS Quit (Cmd+Q / app menu) goes through the app delegate's
@@ -1726,17 +1735,37 @@ impl PaintApp {
     /// app, so other apps paste the image rather than the marker text.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn strip_clipboard_marker(&mut self) {
-        let is_ours = if let Some(cb) = self.system_clipboard() {
-            cb.get_text().ok().as_deref() == Some(CLIP_MARKER)
-        } else {
-            false
-        };
-        if !is_ours {
+        // Windows: detect + re-publish entirely through clipboard-win. Reading
+        // the image back via arboard (get_image) needs a *synthesized* CF_DIBV5
+        // and can fail for the CF_DIB we placed — which would leave both the
+        // image and the marker on the clipboard, so other apps still paste the
+        // marker text. Instead, re-publish the image we already own as
+        // image-only; that guarantees a clean, text-free clipboard.
+        #[cfg(target_os = "windows")]
+        {
+            if win_clip::marker_present(CLIP_MARKER) {
+                if let Some(img) = self.clipboard.clone().or_else(|| self.get_system_image())
+                {
+                    self.put_system_image(&img, false);
+                    self.clipboard = Some(img);
+                }
+            }
             return;
         }
-        if let Some(img) = self.get_system_image() {
-            self.put_system_image(&img, false);
-            self.clipboard = Some(img);
+        #[cfg(target_os = "macos")]
+        {
+            let is_ours = if let Some(cb) = self.system_clipboard() {
+                cb.get_text().ok().as_deref() == Some(CLIP_MARKER)
+            } else {
+                false
+            };
+            if !is_ours {
+                return;
+            }
+            if let Some(img) = self.get_system_image() {
+                self.put_system_image(&img, false);
+                self.clipboard = Some(img);
+            }
         }
     }
 
@@ -4099,7 +4128,21 @@ impl eframe::App for PaintApp {
         // so other apps (e.g. Teams) paste the image, not the marker text.
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+            // An explicit focus event this frame is authoritative (it fires on
+            // the very frame focus changes); otherwise fall back to the
+            // viewport's reported state. This guarantees the strip-on-blur runs
+            // even if `viewport().focused` lags the event by a frame.
+            let focused = ctx.input(|i| {
+                i.events
+                    .iter()
+                    .rev()
+                    .find_map(|e| match e {
+                        egui::Event::WindowFocused(b) => Some(*b),
+                        _ => None,
+                    })
+                    .or(i.viewport().focused)
+                    .unwrap_or(true)
+            });
             if focused {
                 let cc = clipboard_seq();
                 let gained = !self.was_focused;
