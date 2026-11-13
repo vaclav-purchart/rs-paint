@@ -4,6 +4,16 @@ All notable changes to rs-paint are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Open images from the command line (`rs-paint file.png`) and, on macOS, from
+  Finder / **Open With** / `open -a rs-paint file.png` (PNG, JPEG, BMP, GIF).
+- If rs-paint is already running, the file opens in that window as a new tab and
+  the window comes to the front instead of starting a second instance.
+- Opening a file that's already open switches to its tab and reloads it from
+  disk (previous content stays on the undo stack).
+
 ## [1.0.1] - 2026-06-09
 
 ### Fixed

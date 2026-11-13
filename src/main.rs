@@ -187,6 +187,148 @@ mod mac_quit {
     }
 }
 
+/// macOS "open these files" (Finder double-click, Open With, `open -a`, dock
+/// drop) arrives as `application:openURLs:` on the app delegate, which winit
+/// doesn't implement — so the files would be silently dropped. The delegate is
+/// created and installed inside `eframe::run_native`, and a launch-time open is
+/// delivered *before* `applicationDidFinishLaunching:` (i.e. before our first
+/// frame), so we can't add the method lazily like `mac_quit`. Instead we hook
+/// `-[NSApplication setDelegate:]` before the event loop exists and add
+/// `application:openURLs:` to whatever delegate class winit installs. Paths are
+/// queued here and drained by the app each frame.
+#[cfg(target_os = "macos")]
+mod mac_open {
+    use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+    use objc2::sel;
+    use objc2_foundation::{NSArray, NSURL};
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    type SetDelegate = unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject);
+    type OpenUrls =
+        unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject, *mut NSArray<NSURL>);
+
+    static PENDING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
+    static ORIGINAL_SET_DELEGATE: OnceLock<SetDelegate> = OnceLock::new();
+
+    unsafe extern "C-unwind" fn open_urls(
+        _this: *mut AnyObject,
+        _cmd: Sel,
+        _app: *mut AnyObject,
+        urls: *mut NSArray<NSURL>,
+    ) {
+        let Some(urls) = (unsafe { urls.as_ref() }) else {
+            return;
+        };
+        let paths: Vec<PathBuf> = urls
+            .iter()
+            .filter(|u| u.isFileURL())
+            .filter_map(|u| u.path())
+            .map(|p| PathBuf::from(p.to_string()))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        if let Ok(mut q) = PENDING.lock() {
+            q.extend(paths);
+        }
+        if let Ok(g) = CTX.lock() {
+            if let Some(ctx) = g.as_ref() {
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    unsafe extern "C-unwind" fn set_delegate(this: *mut AnyObject, cmd: Sel, delegate: *mut AnyObject) {
+        if let Some(d) = unsafe { delegate.as_ref() } {
+            let cls: &AnyClass = d.class();
+            let imp: Imp = unsafe { std::mem::transmute(open_urls as OpenUrls) };
+            // No-op if the class already implements it.
+            unsafe {
+                objc2::ffi::class_addMethod(
+                    cls as *const _ as *mut _,
+                    sel!(application:openURLs:),
+                    imp,
+                    c"v@:@@".as_ptr(),
+                );
+            }
+        }
+        if let Some(orig) = ORIGINAL_SET_DELEGATE.get() {
+            unsafe { orig(this, cmd, delegate) };
+        }
+    }
+
+    /// Hook `-[NSApplication setDelegate:]`. Must run before `run_native`.
+    pub fn install() {
+        if ORIGINAL_SET_DELEGATE.get().is_some() {
+            return;
+        }
+        let Some(cls) = AnyClass::get(c"NSApplication") else {
+            return;
+        };
+        let Some(method) = cls.instance_method(sel!(setDelegate:)) else {
+            return;
+        };
+        let ours: Imp = unsafe { std::mem::transmute(set_delegate as SetDelegate) };
+        let original = unsafe { method.set_implementation(ours) };
+        let _ = ORIGINAL_SET_DELEGATE.set(unsafe { std::mem::transmute::<Imp, SetDelegate>(original) });
+    }
+
+    /// Remember the egui context so a runtime open can wake the app.
+    pub fn set_ctx(ctx: &egui::Context) {
+        if let Ok(mut g) = CTX.lock() {
+            if g.is_none() {
+                *g = Some(ctx.clone());
+            }
+        }
+    }
+
+    /// Paths macOS asked us to open since the last call.
+    pub fn take() -> Vec<PathBuf> {
+        PENDING.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    }
+
+    /// If another rs-paint instance (same bundle id) is already running, send
+    /// `files` to it — it opens each in a new tab and comes to the front — and
+    /// return true so this process can exit instead of opening a second window.
+    pub fn hand_off_to_running(files: &[PathBuf]) -> bool {
+        use objc2_app_kit::NSRunningApplication;
+        use objc2_foundation::{NSBundle, NSString};
+        let id = NSBundle::mainBundle()
+            .bundleIdentifier()
+            .unwrap_or_else(|| NSString::from_str("com.rspaint.app"));
+        // Compare by pid: `currentApplication()` would check this process in
+        // with LaunchServices, after which `open -a` may route back to *us*.
+        let me = std::process::id() as i32;
+        for app in NSRunningApplication::runningApplicationsWithBundleIdentifier(&id).iter() {
+            let pid: i32 = unsafe { objc2::msg_send![&*app, processIdentifier] };
+            if pid == me || pid <= 0 || app.isTerminated() {
+                continue;
+            }
+            let Some(bundle) = app.bundleURL().and_then(|u| u.path()) else {
+                continue;
+            };
+            // `open -a <that bundle>` delivers the files to the running process
+            // (as `application:openURLs:`) and activates it.
+            let ok = std::process::Command::new("/usr/bin/open")
+                .arg("-a")
+                .arg(bundle.to_string())
+                .args(files)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                // `open` already asks it to activate; ask again explicitly so the
+                // window comes forward even if that request raced our exit.
+                app.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Tool {
     Pencil,
@@ -503,6 +645,9 @@ struct PaintApp {
     // unsaved-changes tracking
     modified: bool,
     show_quit_dialog: bool,
+    /// Files to open (command-line args / macOS open-file events), each in a
+    /// new tab, handled at the start of the next frame.
+    pending_open: Vec<PathBuf>,
     force_quit: bool,
 
     // dialog key actions for the current frame (Esc cancels, Enter confirms)
@@ -605,6 +750,7 @@ impl Default for PaintApp {
             modified: false,
             show_quit_dialog: false,
             force_quit: false,
+            pending_open: Vec::new(),
             dlg_cancel: false,
             dlg_confirm: false,
             show_discard_dialog: false,
@@ -1558,16 +1704,59 @@ impl PaintApp {
         self.load_path(path);
     }
 
+    /// Open `path` in a new tab — or, if it's already open, switch to that tab
+    /// and reload it from disk.
     fn load_path(&mut self, path: PathBuf) {
-        match image::open(&path) {
+        let existing = self.tab_for_path(&path);
+        let ci = match image::open(&path) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
                 let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-                let ci = ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
-                self.new_tab_with(ci, Some(path), false);
+                ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw())
             }
-            Err(e) => eprintln!("Failed to open image: {e}"),
+            Err(e) => {
+                eprintln!("Failed to open image: {e}");
+                if let Some(idx) = existing {
+                    self.switch_to(idx);
+                }
+                return;
+            }
+        };
+        match existing {
+            Some(idx) => {
+                self.switch_to(idx);
+                self.reload_active(ci);
+            }
+            None => self.new_tab_with(ci, Some(path), false),
         }
+    }
+
+    /// Index of the tab showing `path` (compared after resolving symlinks and
+    /// relative components), if any.
+    fn tab_for_path(&self, path: &std::path::Path) -> Option<usize> {
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let want = canon(path);
+        (0..self.docs.len()).find(|&i| {
+            let fp = if i == self.active {
+                &self.file_path
+            } else {
+                &self.docs[i].file_path
+            };
+            fp.as_deref().is_some_and(|p| canon(p) == want)
+        })
+    }
+
+    /// Replace the active tab's image with a fresh copy from disk. The previous
+    /// content (including any unsaved edits) is kept on the undo stack, so a
+    /// refresh never loses work — ⌘Z brings it back.
+    fn reload_active(&mut self, ci: ColorImage) {
+        self.finalize_transient();
+        if ci.size != self.image.size || ci.pixels != self.image.pixels {
+            self.push_undo();
+            self.image = ci;
+        }
+        self.modified = false; // now matches the file on disk
+        self.dirty = true;
     }
 
     /// New / Open create a new tab, so they never discard the current image.
@@ -4100,6 +4289,22 @@ impl eframe::App for PaintApp {
             self.request_open(Some(path));
         }
 
+        // Files passed on the command line or sent by macOS (Finder, Open With,
+        // `open -a rs-paint file.png`): open each in a new tab and bring the
+        // window to the front.
+        #[cfg(target_os = "macos")]
+        {
+            mac_open::set_ctx(ctx);
+            self.pending_open.extend(mac_open::take());
+        }
+        if !self.pending_open.is_empty() {
+            for path in std::mem::take(&mut self.pending_open) {
+                self.load_path(path);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+
         // macOS app-menu / Cmd+Q termination -> route through our prompt.
         #[cfg(target_os = "macos")]
         {
@@ -4262,6 +4467,19 @@ fn load_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    // Image paths given on the command line (ignore e.g. macOS `-psn_…` args).
+    let cli_files: Vec<PathBuf> = std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .collect();
+    // Already running? Hand the files to that instance (new tab + focus) and quit.
+    #[cfg(target_os = "macos")]
+    if !cli_files.is_empty() && mac_open::hand_off_to_running(&cli_files) {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    mac_open::install();
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 800.0])
@@ -4282,6 +4500,7 @@ fn main() -> eframe::Result {
                     app.restore_tabs(tabs, active_tab);
                 }
             }
+            app.pending_open = cli_files;
             Ok(Box::new(app))
         }),
     )
