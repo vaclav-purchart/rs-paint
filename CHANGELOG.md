@@ -14,6 +14,10 @@ All notable changes to rs-paint are documented here. The format is based on
 - Opening a file that's already open switches to its tab and reloads it from
   disk (previous content stays on the undo stack).
 
+### Fixed
+- The active tab is scrolled into view in the tab bar when it changes (e.g.
+  after opening a file while many tabs are open).
+
 ## [1.0.1] - 2026-06-09
 
 ### Fixed

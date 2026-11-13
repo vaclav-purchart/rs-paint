@@ -648,6 +648,8 @@ struct PaintApp {
     /// Files to open (command-line args / macOS open-file events), each in a
     /// new tab, handled at the start of the next frame.
     pending_open: Vec<PathBuf>,
+    /// Scroll the tab bar so the active tab is visible on the next frame.
+    reveal_active_tab: bool,
     force_quit: bool,
 
     // dialog key actions for the current frame (Esc cancels, Enter confirms)
@@ -751,6 +753,7 @@ impl Default for PaintApp {
             show_quit_dialog: false,
             force_quit: false,
             pending_open: Vec::new(),
+            reveal_active_tab: true,
             dlg_cancel: false,
             dlg_confirm: false,
             show_discard_dialog: false,
@@ -1517,6 +1520,7 @@ impl PaintApp {
         self.dirty = true;
         self.floating_dirty = true;
         self.last_img_min = Pos2::ZERO;
+        self.reveal_active_tab = true;
     }
 
     fn switch_to(&mut self, idx: usize) {
@@ -1757,6 +1761,7 @@ impl PaintApp {
         }
         self.modified = false; // now matches the file on disk
         self.dirty = true;
+        self.reveal_active_tab = true;
     }
 
     /// New / Open create a new tab, so they never discard the current image.
@@ -2543,6 +2548,10 @@ impl PaintApp {
                         let selected = i == self.active;
                         let label = egui::RichText::new(self.tab_label(i)).size(14.5);
                         let resp = ui.selectable_label(selected, label);
+                        if selected && self.reveal_active_tab {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                            self.reveal_active_tab = false;
+                        }
                         if resp.clicked() {
                             switch = Some(i);
                         }
